@@ -1,3 +1,5 @@
+#include <fstream>
+
 #include "envoy/data/tap/v2alpha/wrapper.pb.h"
 
 #include "test/integration/http_integration.h"
@@ -88,6 +90,37 @@ public:
     EXPECT_FALSE(admin_response_->complete());
   }
 
+  std::string getTempPathPrefix() {
+    const std::string path_prefix = TestEnvironment::temporaryDirectory() + "/tap_integration_" +
+                                    testing::UnitTest::GetInstance()->current_test_info()->name() +
+                                    "/";
+    TestEnvironment::createPath(path_prefix);
+    return path_prefix;
+  }
+
+  std::vector<envoy::data::tap::v2alpha::TraceWrapper>
+  readTracesFromFile(const std::string& file_name) {
+    std::vector<envoy::data::tap::v2alpha::TraceWrapper> traces;
+    std::ifstream pb_file(file_name);
+    Protobuf::io::IstreamInputStream stream(&pb_file);
+    Protobuf::io::CodedInputStream coded_stream(&stream);
+    while (true) {
+      uint32_t message_size;
+      if (!coded_stream.ReadRaw(reinterpret_cast<char*>(&message_size), sizeof(message_size))) {
+        break;
+      }
+
+      message_size = ntohl(message_size);
+      traces.emplace_back();
+
+      auto limit = coded_stream.PushLimit(message_size);
+      EXPECT_TRUE(traces.back().ParseFromCodedStream(&coded_stream));
+      coded_stream.PopLimit(limit);
+    }
+
+    return traces;
+  }
+
   const Http::TestHeaderMapImpl request_headers_tap_{{":method", "GET"},
                                                      {":path", "/"},
                                                      {":scheme", "http"},
@@ -97,9 +130,13 @@ public:
   const Http::TestHeaderMapImpl request_headers_no_tap_{
       {":method", "GET"}, {":path", "/"}, {":scheme", "http"}, {":authority", "host"}};
 
+  const Http::TestHeaderMapImpl request_trailers_{{"foo_trailer", "bar"}};
+
   const Http::TestHeaderMapImpl response_headers_tap_{{":status", "200"}, {"bar", "baz"}};
 
   const Http::TestHeaderMapImpl response_headers_no_tap_{{":status", "200"}};
+
+  const Http::TestHeaderMapImpl response_trailers_{{"bar_trailer", "baz"}};
 
   const std::string admin_filter_config_ =
       R"EOF(
@@ -135,9 +172,7 @@ config:
               path_prefix: {}
 )EOF";
 
-  const std::string path_prefix =
-      TestEnvironment::temporaryDirectory() + "/tap_integration_static_file/";
-  TestEnvironment::createPath(path_prefix);
+  const std::string path_prefix = getTempPathPrefix();
   initializeFilter(fmt::format(filter_config, path_prefix));
 
   // Initial request/response with tap.
@@ -152,7 +187,7 @@ config:
                               [](const std::string& s) { return absl::EndsWith(s, ".pb"); });
   ASSERT_NE(pb_file, files.end());
 
-  envoy::data::tap::v2alpha::BufferedTraceWrapper trace;
+  envoy::data::tap::v2alpha::TraceWrapper trace;
   MessageUtil::loadFromFile(*pb_file, trace, *api_);
   EXPECT_TRUE(trace.has_http_buffered_trace());
 }
@@ -201,7 +236,7 @@ tap_config:
 
   // Wait for the tap message.
   admin_response_->waitForBodyData(1);
-  envoy::data::tap::v2alpha::BufferedTraceWrapper trace;
+  envoy::data::tap::v2alpha::TraceWrapper trace;
   MessageUtil::loadFromYaml(admin_response_->body(), trace);
   EXPECT_EQ(trace.http_buffered_trace().request().headers().size(), 8);
   EXPECT_EQ(trace.http_buffered_trace().response().headers().size(), 4);
@@ -294,12 +329,10 @@ tap_config:
   startAdminRequest(admin_request_yaml);
 
   codec_client_ = makeHttpConnection(makeClientConnection(lookupPort("http")));
-  const Http::TestHeaderMapImpl request_trailers{{"foo_trailer", "bar"}};
-  const Http::TestHeaderMapImpl response_trailers{{"bar_trailer", "baz"}};
-  makeRequest(request_headers_no_tap_, {}, &request_trailers, response_headers_no_tap_, {},
-              &response_trailers);
+  makeRequest(request_headers_no_tap_, {}, &request_trailers_, response_headers_no_tap_, {},
+              &response_trailers_);
 
-  envoy::data::tap::v2alpha::BufferedTraceWrapper trace;
+  envoy::data::tap::v2alpha::TraceWrapper trace;
   admin_response_->waitForBodyData(1);
   MessageUtil::loadFromYaml(admin_response_->body(), trace);
   EXPECT_EQ("bar",
@@ -330,7 +363,7 @@ tap_config:
   codec_client_ = makeHttpConnection(makeClientConnection(lookupPort("http")));
   makeRequest(request_headers_no_tap_, {{"hello"}}, nullptr, response_headers_no_tap_, {{"world"}},
               nullptr);
-  envoy::data::tap::v2alpha::BufferedTraceWrapper trace;
+  envoy::data::tap::v2alpha::TraceWrapper trace;
   admin_response_->waitForBodyData(1);
   MessageUtil::loadFromYaml(admin_response_->body(), trace);
   EXPECT_EQ("hello", trace.http_buffered_trace().request().body().as_bytes());
@@ -362,7 +395,7 @@ tap_config:
   codec_client_ = makeHttpConnection(makeClientConnection(lookupPort("http")));
   makeRequest(request_headers_no_tap_, {{"hello"}}, nullptr, response_headers_no_tap_, {{"world"}},
               nullptr);
-  envoy::data::tap::v2alpha::BufferedTraceWrapper trace;
+  envoy::data::tap::v2alpha::TraceWrapper trace;
   admin_response_->waitForBodyData(1);
   MessageUtil::loadFromYaml(admin_response_->body(), trace);
   EXPECT_EQ("hello", trace.http_buffered_trace().request().body().as_string());
@@ -395,7 +428,7 @@ tap_config:
   codec_client_ = makeHttpConnection(makeClientConnection(lookupPort("http")));
   makeRequest(request_headers_no_tap_, {{"hello"}}, nullptr, response_headers_no_tap_, {{"world"}},
               nullptr);
-  envoy::data::tap::v2alpha::BufferedTraceWrapper trace;
+  envoy::data::tap::v2alpha::TraceWrapper trace;
   admin_response_->waitForBodyData(1);
   MessageUtil::loadFromYaml(admin_response_->body(), trace);
   EXPECT_EQ("hel", trace.http_buffered_trace().request().body().as_bytes());
@@ -404,6 +437,93 @@ tap_config:
   EXPECT_TRUE(trace.http_buffered_trace().response().body().truncated());
 
   admin_client_->close();
+}
+
+// Verify a static configuration with a request header matcher, writing to a streamed file per tap
+// sink.
+TEST_P(TapIntegrationTest, StaticFilePerTapStreaming) {
+  const std::string filter_config =
+      R"EOF(
+name: envoy.filters.http.tap
+config:
+  common_config:
+    static_config:
+      match_config:
+        http_request_headers_match:
+          headers:
+            - name: foo
+              exact_match: bar
+      output_config:
+        streaming: true
+        sinks:
+          - format: PROTO_BINARY_LENGTH_DELIMITED
+            file_per_tap:
+              path_prefix: {}
+)EOF";
+
+  const std::string path_prefix = getTempPathPrefix();
+  initializeFilter(fmt::format(filter_config, path_prefix));
+
+  // Initial request/response with tap.
+  codec_client_ = makeHttpConnection(makeClientConnection(lookupPort("http")));
+  makeRequest(request_headers_tap_, {"hello"}, &request_trailers_, response_headers_no_tap_,
+              {"world"}, &response_trailers_);
+  codec_client_->close();
+  test_server_->waitForCounterGe("http.config_test.downstream_cx_destroy", 1);
+
+  // Find the written .pb file and verify it.
+  auto files = TestUtility::listFiles(path_prefix, false);
+  auto pb_file_name = std::find_if(files.begin(), files.end(), [](const std::string& s) {
+    return absl::EndsWith(s, ".pb_length_delimited");
+  });
+  ASSERT_NE(pb_file_name, files.end());
+
+  std::vector<envoy::data::tap::v2alpha::TraceWrapper> traces = readTracesFromFile(*pb_file_name);
+  ASSERT_EQ(6, traces.size());
+  // fixfix real checks
+}
+
+// fixfix
+TEST_P(TapIntegrationTest, StaticFilePerTapStreamingWithRequestBuffering) {
+  const std::string filter_config =
+      R"EOF(
+name: envoy.filters.http.tap
+config:
+  common_config:
+    static_config:
+      match_config:
+        http_response_headers_match:
+          headers:
+            - name: bar
+              exact_match: baz
+      output_config:
+        streaming: true
+        sinks:
+          - format: PROTO_BINARY_LENGTH_DELIMITED
+            file_per_tap:
+              path_prefix: {}
+)EOF";
+
+  const std::string path_prefix = getTempPathPrefix();
+  initializeFilter(fmt::format(filter_config, path_prefix));
+
+  // Initial request/response with tap.
+  codec_client_ = makeHttpConnection(makeClientConnection(lookupPort("http")));
+  makeRequest(request_headers_no_tap_, {"hello"}, &request_trailers_, response_headers_tap_,
+              {"world"}, &response_trailers_);
+  codec_client_->close();
+  test_server_->waitForCounterGe("http.config_test.downstream_cx_destroy", 1);
+
+  // Find the written .pb file and verify it.
+  auto files = TestUtility::listFiles(path_prefix, false);
+  auto pb_file_name = std::find_if(files.begin(), files.end(), [](const std::string& s) {
+    return absl::EndsWith(s, ".pb_length_delimited");
+  });
+  ASSERT_NE(pb_file_name, files.end());
+
+  std::vector<envoy::data::tap::v2alpha::TraceWrapper> traces = readTracesFromFile(*pb_file_name);
+  ASSERT_EQ(6, traces.size());
+  // fixfix real checks
 }
 
 } // namespace

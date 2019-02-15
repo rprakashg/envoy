@@ -1,5 +1,7 @@
 #pragma once
 
+#include <fstream>
+
 #include "envoy/buffer/buffer.h"
 #include "envoy/service/tap/v2alpha/common.pb.h"
 
@@ -56,15 +58,32 @@ public:
  * Base class for all tap configurations.
  * TODO(mattklein123): This class will handle common functionality such as rate limiting, etc.
  */
-class TapConfigBaseImpl {
+class TapConfigBaseImpl : public virtual TapConfig {
 public:
-  uint32_t maxBufferedRxBytes() const { return max_buffered_rx_bytes_; }
-  uint32_t maxBufferedTxBytes() const { return max_buffered_tx_bytes_; }
-  size_t numMatchers() const { return matchers_.size(); }
-  Matcher& rootMatcher() const;
-  void
-  submitBufferedTrace(const std::shared_ptr<envoy::data::tap::v2alpha::BufferedTraceWrapper>& trace,
-                      uint64_t trace_id);
+  // A wrapper for a per tap sink handle and trace submission. If in the future we support
+  // multiple sinks we can easily do it here.
+  class PerTapSinkHandleManagerImpl : public PerTapSinkHandleManager {
+  public:
+    PerTapSinkHandleManagerImpl(TapConfigBaseImpl& parent, uint64_t trace_id)
+        : parent_(parent), handle_(parent.sink_to_use_->createPerTapSinkHandle(trace_id)) {}
+
+    // PerTapSinkHandleManager
+    void submitTrace(const TraceWrapperSharedPtr& trace) override;
+
+  private:
+    TapConfigBaseImpl& parent_;
+    PerTapSinkHandlePtr handle_;
+  };
+
+  // TapConfig
+  PerTapSinkHandleManagerPtr createPerTapSinkHandleManager(uint64_t trace_id) override {
+    return std::make_unique<PerTapSinkHandleManagerImpl>(*this, trace_id);
+  }
+  uint32_t maxBufferedRxBytes() const override { return max_buffered_rx_bytes_; }
+  uint32_t maxBufferedTxBytes() const override { return max_buffered_tx_bytes_; }
+  size_t numMatchers() const override { return matchers_.size(); }
+  const Matcher& rootMatcher() const override;
+  bool streaming() const override { return streaming_; }
 
 protected:
   TapConfigBaseImpl(envoy::service::tap::v2alpha::TapConfig&& proto_config,
@@ -77,6 +96,7 @@ private:
 
   const uint32_t max_buffered_rx_bytes_;
   const uint32_t max_buffered_tx_bytes_;
+  const bool streaming_;
   Sink* sink_to_use_;
   SinkPtr sink_;
   envoy::service::tap::v2alpha::OutputSink::Format sink_format_;
@@ -91,12 +111,24 @@ public:
   FilePerTapSink(const envoy::service::tap::v2alpha::FilePerTapSink& config) : config_(config) {}
 
   // Sink
-  void
-  submitBufferedTrace(const std::shared_ptr<envoy::data::tap::v2alpha::BufferedTraceWrapper>& trace,
-                      envoy::service::tap::v2alpha::OutputSink::Format format,
-                      uint64_t trace_id) override;
+  PerTapSinkHandlePtr createPerTapSinkHandle(uint64_t trace_id) override {
+    return std::make_unique<FilePerTapSinkHandle>(*this, trace_id);
+  }
 
 private:
+  struct FilePerTapSinkHandle : public PerTapSinkHandle {
+    FilePerTapSinkHandle(FilePerTapSink& parent, uint64_t trace_id)
+        : parent_(parent), trace_id_(trace_id) {}
+
+    // PerTapSinkHandle
+    void submitTrace(const TraceWrapperSharedPtr& trace,
+                     envoy::service::tap::v2alpha::OutputSink::Format format) override;
+
+    FilePerTapSink& parent_;
+    const uint64_t trace_id_;
+    std::ofstream output_file_;
+  };
+
   const envoy::service::tap::v2alpha::FilePerTapSink config_;
 };
 

@@ -5,12 +5,39 @@
 #include "envoy/http/header_map.h"
 #include "envoy/service/tap/v2alpha/common.pb.h"
 
+#include "extensions/common/tap/tap_matcher.h"
+
 #include "absl/strings/string_view.h"
 
 namespace Envoy {
 namespace Extensions {
 namespace Common {
 namespace Tap {
+
+using TraceWrapperSharedPtr = std::shared_ptr<envoy::data::tap::v2alpha::TraceWrapper>;
+inline TraceWrapperSharedPtr makeTraceWrapper() {
+  return std::make_shared<envoy::data::tap::v2alpha::TraceWrapper>();
+}
+
+/**
+ * A handle for a per-tap sink. This allows submitting either a single buffered trace, or a series
+ * of trace segments that the sink can aggregate in whatever way it chooses.
+ */
+class PerTapSinkHandle {
+public:
+  virtual ~PerTapSinkHandle() = default;
+
+  /**
+   * Send a trace wrapper to the sink. This may be a fully buffered trace or a segment of a larger
+   * trace depending on the contents of the wrapper.
+   * @param trace supplies the trace to send.
+   * @param format supplies the output format to use.
+   */
+  virtual void submitTrace(const TraceWrapperSharedPtr& trace,
+                           envoy::service::tap::v2alpha::OutputSink::Format format) PURE;
+};
+
+using PerTapSinkHandlePtr = std::unique_ptr<PerTapSinkHandle>;
 
 /**
  * Sink for sending tap messages.
@@ -20,16 +47,10 @@ public:
   virtual ~Sink() = default;
 
   /**
-   * Send a fully buffered trace to the sink.
-   * @param trace supplies the trace to send. The trace message is a discrete trace message (as
-   *        opposed to a portion of a larger trace that should be aggregated).
-   * @param format supplies the output format to use.
+   * Create a per tap sink handle for use in submitting either buffered traces or trace segments.
    * @param trace_id supplies a locally unique trace ID. Some sinks use this for output generation.
    */
-  virtual void
-  submitBufferedTrace(const std::shared_ptr<envoy::data::tap::v2alpha::BufferedTraceWrapper>& trace,
-                      envoy::service::tap::v2alpha::OutputSink::Format format,
-                      uint64_t trace_id) PURE;
+  virtual PerTapSinkHandlePtr createPerTapSinkHandle(uint64_t trace_id) PURE;
 };
 
 using SinkPtr = std::unique_ptr<Sink>;
@@ -64,12 +85,33 @@ public:
                             Sink* admin_streamer) PURE;
 };
 
+// fixfix
+class PerTapSinkHandleManager {
+public:
+  virtual ~PerTapSinkHandleManager() = default;
+
+  // fixfix
+  virtual void submitTrace(const TraceWrapperSharedPtr& trace) PURE;
+};
+
+using PerTapSinkHandleManagerPtr = std::unique_ptr<PerTapSinkHandleManager>;
+
 /**
  * Abstract tap configuration base class. Used for type safety.
  */
 class TapConfig {
 public:
   virtual ~TapConfig() = default;
+
+  // fixfix
+  virtual PerTapSinkHandleManagerPtr createPerTapSinkHandleManager(uint64_t trace_id) PURE;
+
+  // fixfix
+  virtual uint32_t maxBufferedRxBytes() const PURE;
+  virtual uint32_t maxBufferedTxBytes() const PURE;
+  virtual size_t numMatchers() const PURE;
+  virtual const Matcher& rootMatcher() const PURE;
+  virtual bool streaming() const PURE;
 };
 
 using TapConfigSharedPtr = std::shared_ptr<TapConfig>;

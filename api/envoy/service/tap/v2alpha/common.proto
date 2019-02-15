@@ -90,6 +90,9 @@ message OutputConfig {
   // <envoy_api_field_data.tap.v2alpha.Body.truncated>` field will be set. If not specified, the
   // default is 1KiB.
   google.protobuf.UInt32Value max_buffered_tx_bytes = 3;
+
+  // fixfix
+  bool streaming = 4;
 }
 
 // Tap output sink configuration.
@@ -121,8 +124,11 @@ message OutputSink {
     // this output format makes consumption simpler.
     PROTO_BINARY = 2;
 
+    // fixfix
+    PROTO_BINARY_LENGTH_DELIMITED = 3;
+
     // Text proto format.
-    PROTO_TEXT = 3;
+    PROTO_TEXT = 4;
   }
 
   // Sink output format.

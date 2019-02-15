@@ -31,3 +31,34 @@ message HttpBufferedTrace {
   // Response message.
   Message response = 2;
 }
+
+// A streamed trace segment. Mulitple segments make up a full trace.
+message HttpStreamedTrace {
+  // Wrapper for a set of headers.
+  message HeaderMap {
+    repeated api.v2.core.HeaderValue headers = 1;
+  }
+
+  // Unique trace ID to the originating Envoy.
+  uint64 trace_id = 1;
+
+  oneof message_piece {
+    // Request headers.
+    HeaderMap request_headers = 2;
+
+    // Request body chunk.
+    Body request_body_chunk = 3;
+
+    // Request trailers.
+    HeaderMap request_trailers = 4;
+
+    // Response headers.
+    HeaderMap response_headers = 5;
+
+    // Response body chunk.
+    Body response_body_chunk = 6;
+
+    // Response trailers.
+    HeaderMap response_trailers = 7;
+  }
+}
